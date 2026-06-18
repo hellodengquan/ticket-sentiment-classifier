@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from ticket_classifier.cli import build_parser, load_config, run
 from ticket_classifier.config import Config
+from ticket_classifier.report_builder import ReportBuilder
 
 
 class TestBuildParser:
@@ -204,3 +205,97 @@ class TestCLIRun:
             assert (Path(output_dir) / "batch_summary.json").exists()
             assert (Path(output_dir) / "low_confidence_report.json").exists()
             assert not (Path(output_dir) / "predictions.csv").exists()
+
+
+class TestReportBuilder:
+    @pytest.fixture
+    def sample_tickets_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tickets = [
+                ("ticket_001.txt", "This product is absolutely wonderful! Best purchase ever."),
+                ("ticket_002.txt", "Terrible experience, the product broke immediately."),
+                ("ticket_003.txt", "The product is okay, works as advertised."),
+            ]
+            for filename, content in tickets:
+                (Path(temp_dir) / filename).write_text(content, encoding="utf-8")
+            yield temp_dir
+
+    @pytest.fixture
+    def builder(self):
+        config = Config({"confidence_threshold": 0.7, "output_format": "both", "output_dir": "output", "random_state": 42})
+        return ReportBuilder(config)
+
+    def test_read_tickets_directory(self, builder, sample_tickets_dir):
+        tickets = builder.read_tickets(sample_tickets_dir)
+        assert len(tickets) == 3
+        assert all("content" in t for t in tickets)
+
+    def test_read_tickets_single_file(self, builder, sample_tickets_dir):
+        file_path = str(Path(sample_tickets_dir) / "ticket_001.txt")
+        tickets = builder.read_tickets(file_path)
+        assert len(tickets) == 1
+        assert tickets[0]["file_name"] == "ticket_001.txt"
+
+    def test_read_tickets_nonexistent_path(self, builder):
+        with pytest.raises(FileNotFoundError):
+            builder.read_tickets("/nonexistent/path")
+
+    def test_predict(self, builder, sample_tickets_dir):
+        tickets = builder.read_tickets(sample_tickets_dir)
+        predictions = builder.predict(tickets)
+        assert len(predictions) == 3
+        for p in predictions:
+            assert "sentiment" in p
+            assert "confidence" in p
+            assert "probabilities" in p
+
+    def test_build_report(self, builder, sample_tickets_dir):
+        tickets = builder.read_tickets(sample_tickets_dir)
+        predictions = builder.predict(tickets)
+        with tempfile.TemporaryDirectory() as output_dir:
+            outputs = builder.build_report(predictions, tickets, output_dir=output_dir)
+            assert "batch_summary" in outputs
+            assert "low_confidence_report" in outputs
+            assert "predictions_csv" in outputs
+            assert "low_confidence_csv" in outputs
+            assert (Path(output_dir) / "batch_summary.json").exists()
+            assert (Path(output_dir) / "predictions.csv").exists()
+
+    def test_build_report_csv_only(self, sample_tickets_dir):
+        config = Config({"confidence_threshold": 0.7, "output_format": "csv", "output_dir": "output", "random_state": 42})
+        builder = ReportBuilder(config)
+        tickets = builder.read_tickets(sample_tickets_dir)
+        predictions = builder.predict(tickets)
+        with tempfile.TemporaryDirectory() as output_dir:
+            outputs = builder.build_report(predictions, tickets, output_dir=output_dir)
+            assert "predictions_csv" in outputs
+            assert "low_confidence_csv" in outputs
+            assert "batch_summary" not in outputs
+
+    def test_run_pipeline(self, builder, sample_tickets_dir):
+        with tempfile.TemporaryDirectory() as output_dir:
+            config = Config({"confidence_threshold": 0.7, "output_format": "both", "output_dir": output_dir, "random_state": 42})
+            builder = ReportBuilder(config)
+            result = builder.run_pipeline(sample_tickets_dir)
+            assert "_meta" in result
+            assert result["_meta"]["total_tickets"] == 3
+            assert isinstance(result["_meta"]["low_confidence_count"], int)
+
+    def test_run_pipeline_empty_dir(self, builder):
+        with tempfile.TemporaryDirectory() as empty_dir:
+            with pytest.raises(ValueError, match="No tickets found"):
+                builder.run_pipeline(empty_dir)
+
+    def test_build_report_format_override(self, builder, sample_tickets_dir):
+        tickets = builder.read_tickets(sample_tickets_dir)
+        predictions = builder.predict(tickets)
+        outputs = builder.build_report(predictions, tickets, output_format="json")
+        assert "batch_summary" in outputs
+        assert "predictions_csv" not in outputs
+
+    def test_build_report_in_memory(self, builder, sample_tickets_dir):
+        tickets = builder.read_tickets(sample_tickets_dir)
+        predictions = builder.predict(tickets)
+        outputs = builder.build_report(predictions, tickets, output_dir="")
+        assert "batch_summary" in outputs
+        assert "predictions_csv" in outputs
