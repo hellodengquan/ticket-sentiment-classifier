@@ -83,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-c", "--config",
         type=str,
         default=None,
-        help="Path to JSON config file"
+        help="Path to config file (.json or .toml)"
     )
     parser.add_argument(
         "--random-state",
@@ -96,25 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_config(args: argparse.Namespace) -> Config:
-    if args.config:
-        config = Config.from_file(args.config)
-    else:
-        config = Config()
-
-    cli_overrides = {}
-    if args.confidence_threshold is not None:
-        cli_overrides["confidence_threshold"] = args.confidence_threshold
-    if args.output_format is not None:
-        cli_overrides["output_format"] = args.output_format
-    if args.output_dir is not None:
-        cli_overrides["output_dir"] = args.output_dir
-    if args.random_state is not None:
-        cli_overrides["random_state"] = args.random_state
-
-    for key, value in cli_overrides.items():
-        setattr(config, key, value)
-
-    return config
+    return Config.resolve(cli_args=args, config_file_path=args.config)
 
 
 def run(args: Optional[List[str]] = None) -> int:

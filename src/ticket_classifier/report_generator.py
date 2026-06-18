@@ -3,7 +3,7 @@ import csv
 import io
 from collections import Counter
 from pathlib import Path
-from typing import List, Dict, Union, Optional
+from typing import List, Dict, Union, Optional, Iterator, IO
 from datetime import datetime
 
 
@@ -120,6 +120,181 @@ class ReportGenerator:
 
         return outputs
 
+    def stream_predictions_csv(
+        self,
+        predictions: Iterator[Dict[str, Union[str, float]]],
+        tickets: Optional[List[Dict[str, Union[str, int]]]] = None,
+        output_path: Optional[str] = None
+    ) -> Optional[str]:
+        if output_path:
+            with open(output_path, "w", encoding="utf-8", newline="") as f:
+                self._stream_predictions_to_fileobj(predictions, tickets, f)
+            with open(output_path, "r", encoding="utf-8") as f:
+                return f.read()
+        else:
+            output = io.StringIO()
+            self._stream_predictions_to_fileobj(predictions, tickets, output)
+            return output.getvalue()
+
+    def stream_low_confidence_csv(
+        self,
+        low_conf_samples: Iterator[Dict],
+        output_path: Optional[str] = None
+    ) -> Optional[str]:
+        if output_path:
+            with open(output_path, "w", encoding="utf-8", newline="") as f:
+                self._stream_low_confidence_to_fileobj(low_conf_samples, f)
+            with open(output_path, "r", encoding="utf-8") as f:
+                return f.read()
+        else:
+            output = io.StringIO()
+            self._stream_low_confidence_to_fileobj(low_conf_samples, output)
+            return output.getvalue()
+
+    def iter_predictions_csv_rows(
+        self,
+        predictions: Iterator[Dict[str, Union[str, float]]],
+        tickets: Optional[List[Dict[str, Union[str, int]]]] = None
+    ) -> Iterator[str]:
+        output = io.StringIO()
+        prob_labels: Optional[List[str]] = None
+        first_row = True
+        writer: Optional[csv.DictWriter] = None
+
+        for idx, pred in enumerate(predictions):
+            if first_row:
+                headers = ["id", "file_name", "sentiment", "confidence"]
+                if "probabilities" in pred:
+                    prob_labels = sorted(pred["probabilities"].keys())
+                    headers.extend([f"prob_{label}" for label in prob_labels])
+                writer = csv.DictWriter(output, fieldnames=headers)
+                writer.writeheader()
+                first_row = False
+
+            row = {
+                "id": idx,
+                "file_name": tickets[idx]["file_name"] if tickets else f"ticket_{idx}",
+                "sentiment": pred["sentiment"],
+                "confidence": pred["confidence"]
+            }
+            if prob_labels and "probabilities" in pred:
+                for label in prob_labels:
+                    row[f"prob_{label}"] = round(pred["probabilities"][label], 4)
+            writer.writerow(row)
+            output.seek(0)
+            chunk = output.read()
+            output.seek(0)
+            output.truncate()
+            if chunk:
+                yield chunk
+
+    def iter_low_confidence_samples(
+        self,
+        predictions: Iterator[Dict[str, Union[str, float]]],
+        tickets: Optional[List[Dict[str, Union[str, int]]]] = None
+    ) -> Iterator[Dict]:
+        for idx, pred in enumerate(predictions):
+            if pred["confidence"] < self.low_confidence_threshold:
+                yield {
+                    "index": idx,
+                    "file_name": tickets[idx]["file_name"] if tickets else f"ticket_{idx}",
+                    "sentiment": pred["sentiment"],
+                    "confidence": pred["confidence"],
+                    "probabilities": pred["probabilities"]
+                }
+
+    def _stream_predictions_to_fileobj(
+        self,
+        predictions: Iterator[Dict[str, Union[str, float]]],
+        tickets: Optional[List[Dict[str, Union[str, int]]]],
+        fileobj: IO[str]
+    ) -> None:
+        headers = ["id", "file_name", "sentiment", "confidence"]
+        prob_labels: Optional[List[str]] = None
+        has_data = False
+
+        try:
+            first_pred = next(predictions)
+            has_data = True
+            if "probabilities" in first_pred:
+                prob_labels = sorted(first_pred["probabilities"].keys())
+                headers.extend([f"prob_{label}" for label in prob_labels])
+        except StopIteration:
+            first_pred = None
+
+        writer = csv.DictWriter(fileobj, fieldnames=headers, lineterminator="\n")
+        writer.writeheader()
+
+        if has_data and first_pred is not None:
+            row = {
+                "id": 0,
+                "file_name": tickets[0]["file_name"] if tickets else "ticket_0",
+                "sentiment": first_pred["sentiment"],
+                "confidence": first_pred["confidence"]
+            }
+            if prob_labels and "probabilities" in first_pred:
+                for label in prob_labels:
+                    row[f"prob_{label}"] = round(first_pred["probabilities"][label], 4)
+            writer.writerow(row)
+
+            for offset, pred in enumerate(predictions):
+                actual_idx = offset + 1
+                row = {
+                    "id": actual_idx,
+                    "file_name": tickets[actual_idx]["file_name"] if tickets else f"ticket_{actual_idx}",
+                    "sentiment": pred["sentiment"],
+                    "confidence": pred["confidence"]
+                }
+                if prob_labels and "probabilities" in pred:
+                    for label in prob_labels:
+                        row[f"prob_{label}"] = round(pred["probabilities"][label], 4)
+                writer.writerow(row)
+
+    def _stream_low_confidence_to_fileobj(
+        self,
+        low_conf_samples: Iterator[Dict],
+        fileobj: IO[str]
+    ) -> None:
+        headers = ["index", "file_name", "sentiment", "confidence"]
+        prob_labels: Optional[List[str]] = None
+        has_data = False
+
+        try:
+            first_sample = next(low_conf_samples)
+            has_data = True
+            if "probabilities" in first_sample:
+                prob_labels = sorted(first_sample["probabilities"].keys())
+                headers.extend([f"prob_{label}" for label in prob_labels])
+        except StopIteration:
+            first_sample = None
+
+        writer = csv.DictWriter(fileobj, fieldnames=headers, lineterminator="\n")
+        writer.writeheader()
+
+        if has_data and first_sample is not None:
+            row = {
+                "index": first_sample.get("index", ""),
+                "file_name": first_sample.get("file_name", ""),
+                "sentiment": first_sample.get("sentiment", ""),
+                "confidence": first_sample.get("confidence", "")
+            }
+            if prob_labels and "probabilities" in first_sample:
+                for label in prob_labels:
+                    row[f"prob_{label}"] = round(first_sample["probabilities"][label], 4)
+            writer.writerow(row)
+
+            for sample in low_conf_samples:
+                row = {
+                    "index": sample.get("index", ""),
+                    "file_name": sample.get("file_name", ""),
+                    "sentiment": sample.get("sentiment", ""),
+                    "confidence": sample.get("confidence", "")
+                }
+                if prob_labels and "probabilities" in sample:
+                    for label in prob_labels:
+                        row[f"prob_{label}"] = round(sample["probabilities"][label], 4)
+                writer.writerow(row)
+
     def _write_reports_to_dir(
         self,
         fmt: str,
@@ -149,8 +324,8 @@ class ReportGenerator:
         if fmt in ("csv", "both"):
             predictions_csv_path = str(Path(output_dir) / "predictions.csv")
             low_conf_csv_path = str(Path(output_dir) / "low_confidence.csv")
-            self._write_csv(predictions, tickets, predictions_csv_path)
-            self._write_low_confidence_csv(low_conf_samples, low_conf_csv_path)
+            self.stream_predictions_csv(iter(predictions), tickets, predictions_csv_path)
+            self.stream_low_confidence_csv(iter(low_conf_samples), low_conf_csv_path)
             outputs["predictions_csv"] = predictions_csv_path
             outputs["low_confidence_csv"] = low_conf_csv_path
 
@@ -178,8 +353,8 @@ class ReportGenerator:
             outputs["low_confidence_report"] = json.dumps(low_conf_report, indent=2, ensure_ascii=False)
 
         if fmt in ("csv", "both"):
-            outputs["predictions_csv"] = self._predictions_to_csv(predictions, tickets)
-            outputs["low_confidence_csv"] = self._low_confidence_to_csv(low_conf_samples)
+            outputs["predictions_csv"] = self.stream_predictions_csv(iter(predictions), tickets)
+            outputs["low_confidence_csv"] = self.stream_low_confidence_csv(iter(low_conf_samples))
 
         return outputs
 
@@ -187,78 +362,30 @@ class ReportGenerator:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
+    def _predictions_to_csv(
+        self,
+        predictions: List[Dict[str, Union[str, float]]],
+        tickets: Optional[List[Dict[str, Union[str, int]]]]
+    ) -> str:
+        return self.stream_predictions_csv(iter(predictions), tickets)
+
+    def _low_confidence_to_csv(
+        self,
+        low_conf_samples: List[Dict]
+    ) -> str:
+        return self.stream_low_confidence_csv(iter(low_conf_samples))
+
     def _write_csv(
         self,
         predictions: List[Dict[str, Union[str, float]]],
         tickets: Optional[List[Dict[str, Union[str, int]]]],
         file_path: str
     ) -> None:
-        content = self._predictions_to_csv(predictions, tickets)
-        with open(file_path, "w", encoding="utf-8", newline="") as f:
-            f.write(content)
+        self.stream_predictions_csv(iter(predictions), tickets, file_path)
 
     def _write_low_confidence_csv(
         self,
         low_conf_samples: List[Dict],
         file_path: str
     ) -> None:
-        content = self._low_confidence_to_csv(low_conf_samples)
-        with open(file_path, "w", encoding="utf-8", newline="") as f:
-            f.write(content)
-
-    def _predictions_to_csv(
-        self,
-        predictions: List[Dict[str, Union[str, float]]],
-        tickets: Optional[List[Dict[str, Union[str, int]]]]
-    ) -> str:
-        output = io.StringIO()
-
-        headers = ["id", "file_name", "sentiment", "confidence"]
-        if predictions and "probabilities" in predictions[0]:
-            prob_labels = sorted(predictions[0]["probabilities"].keys())
-            headers.extend([f"prob_{label}" for label in prob_labels])
-
-        writer = csv.DictWriter(output, fieldnames=headers)
-        writer.writeheader()
-
-        for idx, pred in enumerate(predictions):
-            row = {
-                "id": idx,
-                "file_name": tickets[idx]["file_name"] if tickets else f"ticket_{idx}",
-                "sentiment": pred["sentiment"],
-                "confidence": pred["confidence"]
-            }
-            if "probabilities" in pred:
-                for label in prob_labels:
-                    row[f"prob_{label}"] = round(pred["probabilities"][label], 4)
-            writer.writerow(row)
-
-        return output.getvalue()
-
-    def _low_confidence_to_csv(
-        self,
-        low_conf_samples: List[Dict]
-    ) -> str:
-        output = io.StringIO()
-
-        headers = ["index", "file_name", "sentiment", "confidence"]
-        if low_conf_samples and "probabilities" in low_conf_samples[0]:
-            prob_labels = sorted(low_conf_samples[0]["probabilities"].keys())
-            headers.extend([f"prob_{label}" for label in prob_labels])
-
-        writer = csv.DictWriter(output, fieldnames=headers)
-        writer.writeheader()
-
-        for sample in low_conf_samples:
-            row = {
-                "index": sample.get("index", ""),
-                "file_name": sample.get("file_name", ""),
-                "sentiment": sample.get("sentiment", ""),
-                "confidence": sample.get("confidence", "")
-            }
-            if "probabilities" in sample:
-                for label in prob_labels:
-                    row[f"prob_{label}"] = round(sample["probabilities"][label], 4)
-            writer.writerow(row)
-
-        return output.getvalue()
+        self.stream_low_confidence_csv(iter(low_conf_samples), file_path)
