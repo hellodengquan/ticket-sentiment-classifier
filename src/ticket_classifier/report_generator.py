@@ -1,6 +1,9 @@
 import json
 import csv
 import io
+import errno
+import os
+import builtins
 from collections import Counter
 from pathlib import Path
 from typing import List, Dict, Union, Optional, Iterator, IO
@@ -127,9 +130,15 @@ class ReportGenerator:
         output_path: Optional[str] = None
     ) -> Optional[str]:
         if output_path:
-            with open(output_path, "w", encoding="utf-8", newline="") as f:
+            f = builtins.open(output_path, "w", encoding="utf-8", newline="")
+            try:
                 self._stream_predictions_to_fileobj(predictions, tickets, f)
-            with open(output_path, "r", encoding="utf-8") as f:
+            finally:
+                try:
+                    f.close()
+                except BrokenPipeError:
+                    pass
+            with builtins.open(output_path, "r", encoding="utf-8") as f:
                 return f.read()
         else:
             output = io.StringIO()
@@ -142,9 +151,15 @@ class ReportGenerator:
         output_path: Optional[str] = None
     ) -> Optional[str]:
         if output_path:
-            with open(output_path, "w", encoding="utf-8", newline="") as f:
+            f = builtins.open(output_path, "w", encoding="utf-8", newline="")
+            try:
                 self._stream_low_confidence_to_fileobj(low_conf_samples, f)
-            with open(output_path, "r", encoding="utf-8") as f:
+            finally:
+                try:
+                    f.close()
+                except BrokenPipeError:
+                    pass
+            with builtins.open(output_path, "r", encoding="utf-8") as f:
                 return f.read()
         else:
             output = io.StringIO()
@@ -305,6 +320,7 @@ class ReportGenerator:
         output_dir: str
     ) -> Dict[str, str]:
         outputs = {}
+        written_paths: List[str] = []
         low_conf_report = {
             "report_type": "low_confidence_tickets",
             "threshold": self.low_confidence_threshold,
@@ -313,21 +329,34 @@ class ReportGenerator:
             "samples": low_conf_samples
         }
 
-        if fmt in ("json", "both"):
-            summary_path = str(Path(output_dir) / "batch_summary.json")
-            low_conf_path = str(Path(output_dir) / "low_confidence_report.json")
-            self._write_json(batch_summary, summary_path)
-            self._write_json(low_conf_report, low_conf_path)
-            outputs["batch_summary"] = summary_path
-            outputs["low_confidence_report"] = low_conf_path
+        try:
+            if fmt in ("json", "both"):
+                summary_path = str(Path(output_dir) / "batch_summary.json")
+                low_conf_path = str(Path(output_dir) / "low_confidence_report.json")
+                self._write_json(batch_summary, summary_path)
+                written_paths.append(summary_path)
+                self._write_json(low_conf_report, low_conf_path)
+                written_paths.append(low_conf_path)
+                outputs["batch_summary"] = summary_path
+                outputs["low_confidence_report"] = low_conf_path
 
-        if fmt in ("csv", "both"):
-            predictions_csv_path = str(Path(output_dir) / "predictions.csv")
-            low_conf_csv_path = str(Path(output_dir) / "low_confidence.csv")
-            self.stream_predictions_csv(iter(predictions), tickets, predictions_csv_path)
-            self.stream_low_confidence_csv(iter(low_conf_samples), low_conf_csv_path)
-            outputs["predictions_csv"] = predictions_csv_path
-            outputs["low_confidence_csv"] = low_conf_csv_path
+            if fmt in ("csv", "both"):
+                predictions_csv_path = str(Path(output_dir) / "predictions.csv")
+                low_conf_csv_path = str(Path(output_dir) / "low_confidence.csv")
+                written_paths.append(predictions_csv_path)
+                self.stream_predictions_csv(iter(predictions), tickets, predictions_csv_path)
+                written_paths.append(low_conf_csv_path)
+                self.stream_low_confidence_csv(iter(low_conf_samples), low_conf_csv_path)
+                outputs["predictions_csv"] = predictions_csv_path
+                outputs["low_confidence_csv"] = low_conf_csv_path
+        except BrokenPipeError:
+            for p in written_paths:
+                try:
+                    os.remove(p)
+                except OSError as e:
+                    if e.errno != errno.ENOENT:
+                        pass
+            raise
 
         return outputs
 
@@ -359,7 +388,7 @@ class ReportGenerator:
         return outputs
 
     def _write_json(self, data: Dict, file_path: str) -> None:
-        with open(file_path, "w", encoding="utf-8") as f:
+        with builtins.open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
     def _predictions_to_csv(
